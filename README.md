@@ -8,8 +8,6 @@ A basic  and  optimized cross-data center  pipeline parallel scheduling algorith
 
 reproduce algorithm
 
-![basic_algorithm](\photo\basic_algorithm.png)
 
-### Log
+### Explanation
 
-+ **4/16**：

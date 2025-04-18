@@ -9,7 +9,9 @@ DC_DELAY_TIME = 4
 # 1：random_neighborhood
 OPTIMIZER = 1
 
-
+# 模拟退火参数
+Epsilon = 1
+CoolingRate = 0.90
 
 
 
