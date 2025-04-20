@@ -83,9 +83,9 @@ def create_figure(data_dict, pp_stages, total_time):
         ))
 
 
-    fig.update_layout(
-        yaxis=dict(autorange='reversed')
-    )
+    # fig.update_layout(
+    #     yaxis=dict(autorange='reversed')
+    # )
 
     fig.update_layout(shapes=(all_shapes + vline_shapes))
     fig.write_html("pp_schedule_interactive.html", include_plotlyjs='cdn')

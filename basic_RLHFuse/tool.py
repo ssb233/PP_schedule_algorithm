@@ -30,27 +30,23 @@ def check_schedule_is_valid(schedule_matrix,schedule):
 def energy_compute(schedule_matrix, schedule):
     # 构建临时字典记录当前调度的时间规划情况
     task_time_dict = construct_task_time_dict(schedule.task_counts)
-    size_list = [len(schedule_matrix[i]) for i in range(schedule.pp_stages)] # 记录每一行迭代终点
-    iter_list = [0 for i in range(schedule.pp_stages)] # 记录每一行的迭代位置
     total_end_time = 0
     
     for k in range(schedule.pp_stages):
-        while iter_list[k] < size_list[k]:
-            task_id = schedule_matrix[k][iter_list[k]]
+        for i in range(len(schedule_matrix[k])):
+            task_id = schedule_matrix[k][i]
             task = schedule.tasks[task_id]
-            if iter_list[k] == 0:
+            if i == 0:
                 # 我们不去改task.end_time，因为每次的计算都是临时的结果，并非最终
                 # task.end_time = compute_task_end_time(task_time_dict, task, schedule, iter_list[k]-1)
                 task_time_dict[task_id] = compute_task_end_time(task_time_dict,task, schedule)
             else:
-                left_task = schedule.tasks[schedule_matrix[k][iter_list[k]-1]]
-                left_task_end_time = task_time_dict[left_task.task_id]
-                task_time_dict[task_id] = compute_task_end_time(task_time_dict, task, schedule, left_task_end_time)
+                
+                left_task_end_time_max = max([task_time_dict[j] for j in schedule_matrix[k][:i]]) # 计算左侧任务的最大结束时间
+                task_time_dict[task_id] = compute_task_end_time(task_time_dict, task, schedule, left_task_end_time_max)
             # 每次更新最终完成时间
             if task_time_dict[task_id] > total_end_time:
                 total_end_time = task_time_dict[task_id]
-
-            iter_list[k] += 1
     # print(f"total_end_time: {total_end_time}")
     return total_end_time, task_time_dict
 
@@ -105,9 +101,14 @@ def set_is_cross_DC_task(task, stage_start, stage_end, pp_DC_divided_up, is_reve
 def data_standardization_for_visual(schedule):
     data_dict = {}
     task_time_dict = schedule.schdule_time_map # 获取计算好的所有任务的结束时间映射
+    correct_batch_num = {
+        a:c for a,b,c in schedule.mirco_batches
+        # model_id : micro_batch_num
+    }
     for task in schedule.task_list:
         task_id = task.task_id
         start_time = task_time_dict[task_id] - task.cal_delay - (DC_DELAY_TIME if task.is_cross_DC else 0)
+        corrected_num = 0 if task.task_type=="forward" else correct_batch_num[task.model_id]
         data_dict[task_id] = {
             "start_time": start_time,
             "end_time": task_time_dict[task_id],
@@ -115,7 +116,7 @@ def data_standardization_for_visual(schedule):
             "is_cross_DC": task.is_cross_DC,
             "task_type": task.task_type,
             "pp_stage": task.pp_stage_id,
-            "micro_batch_id": task.micro_batch_id,
+            "micro_batch_id": task.micro_batch_id - corrected_num,
             "model_id": task.model_id
         }
     return data_dict

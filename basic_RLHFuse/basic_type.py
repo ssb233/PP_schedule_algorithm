@@ -123,13 +123,20 @@ class Schedule:
                 # 后向任务
                 for k in range(1+i*dp_group_batch_num, 1+(i+1)*dp_group_batch_num):
                     back_k = k + micro_batch_num # 后向任务的编号
-                    # 后向任务的首个行数，即最后一行，需要考虑其左侧的约束，intra_stage约束
+                    # 第一行
                     if (j-1+flag) % pp_total_num == 0:
-                        self.add_constraint((j, k, j, back_k), model_id)
+                        if (k-1)%dp_group_batch_num ==0:# 第一个batch只依赖于其前向
+                            self.add_constraint((j, k, j, back_k), model_id)
+                        else:# 其余的既依赖于其前向，也依赖于前一个后向
+                            self.add_constraint((j, k, j, back_k), model_id)
+                            self.add_constraint((j, back_k-1, j, back_k), model_id)
                     else:
-                        self.add_constraint((j+step, back_k, j, back_k), model_id) #inter_stage约束
-                        self.add_constraint((j, k, j, back_k), model_id) #intra_stage约束
-                        
+                        if (k-1)%dp_group_batch_num ==0: # 无左侧约束，有inter_stage约束
+                            self.add_constraint((j+step, back_k, j, back_k), model_id)
+                        else:
+                            self.add_constraint((j+step, back_k, j, back_k), model_id) # inter_stage约束
+                            self.add_constraint((j, back_k-1, j, back_k), model_id) # intra_stage约束
+                            
                 
         print(f"Model {model_id} add constraint successfully!")
 
@@ -140,7 +147,7 @@ class Schedule:
         for i in range(dp_groups):
             for j in range(pp_start_layer + i * pp_total_num * step, pp_start_layer + (i + 1) * pp_total_num * step, step):
                 for k in range(1+i*dp_group_batch_num, 1+(i+1)*dp_group_batch_num):
-                    # 同一行的前向和后向的编号应该互补
+                    # 同一行的前向和后向的编号差值为micro_batch_num
                     task_forward = Task('forward', model_id, k, j, self.task_counter())
                     task_backend = Task('backward', model_id, k+micro_batch_num, j, self.task_counter())
                     if self.DC_debug == True:
@@ -192,6 +199,17 @@ class Schedule:
                     self.remained_task.remove(target_task)
                     finished_task_list.append(target_task.task_id)
         print("Greedy init matrix successfully!\n")
+        with open('schedule_task.txt','w') as f:
+            for i in range(len(self.scheduled_task)):
+                f.write(f"Stage {i+1}:")
+                for task_id in self.scheduled_task[i]:
+                    model_id = self.tasks[task_id].model_id
+                    batch_id = self.tasks[task_id].micro_batch_id
+                    map = {a:c for a,b,c in self.mirco_batches}
+                    if self.tasks[task_id].task_type == 'backward':
+                        batch_id = batch_id - map[model_id]
+                    f.write(f"({model_id}, {batch_id}) ")
+                f.write("\n")
         # print([len(a) for a in self.scheduled_task])
     
     # 模拟退火 simulated annealing，最后得到的
@@ -219,6 +237,8 @@ class Schedule:
         print("Simulated annealing successfully!")
         print(f"Total end time: {self.total_end_time}")
         print(f"Schedule time map: {self.schdule_time_map}")
+        
+                
          
 
 if __name__ == "__main__":
