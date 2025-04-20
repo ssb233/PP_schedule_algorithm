@@ -1,16 +1,18 @@
 import numpy as np
 import global_config as config
-from tool import energy_compute
+from tool import energy_compute, set_is_cross_DC_task, data_standardization_for_visual
 from optimizer_choose import random_neighborhood
 import random
+from my_visual import create_figure
+import json
 
 
 class Task:
     def __init__(self,task_type, model_id=1, micro_batch_id=1, pp_stage_id=1, task_id=0):
         self.model_id = model_id
-        self.micro_batch_id = micro_batch_id # S_j
+        self.micro_batch_id = micro_batch_id # S_j,前向任务是对应的，后向任务需要减去micro_batches
         self.task_id = task_id # 任务id,唯一标定每个任务
-        self.pp_stage_id = pp_stage_id # S_i
+        self.pp_stage_id = pp_stage_id # S_i, 1~pp_stages
         self.task_type = task_type # forward / backward / inter-DC-delay
         self.cal_delay = config.parse_task_type_to_time(self.task_type) # 计算延迟
         self.start_time = 0
@@ -19,19 +21,20 @@ class Task:
         self.left_task = None # 左邻居任务,依赖关系
         self.right_task = None # 右邻居任务,依赖关系
         self.is_feasible = False # 是否可调度,只有需求关系都满足了才能调度
-        def set_start_time(self, start_time):
-            self.start_time = start_time
-            
-        def set_end_time(self, end_time):
-            self.end_time = end_time
+        self.is_cross_DC = False # 是否跨数据中心,如果是跨数据中心，那么就需要考虑通信延迟
+    def set_start_time(self, start_time):
+        self.start_time = start_time
         
-        # 更新任务的可调度性，只要自己的pre_task的所有事件都被调度了，那么自己的状态就切换到可调度
-        def update_feasibility(self, scheduled_list):
-            for constraint in self.pre_task:
-                if constraint not in scheduled_list:
-                    return False
-            self.is_feasible = True
-            return True
+    def set_end_time(self, end_time):
+        self.end_time = end_time
+    
+    # 更新任务的可调度性，只要自己的pre_task的所有事件都被调度了，那么自己的状态就切换到可调度
+    def update_feasibility(self, scheduled_list):
+        for constraint in self.pre_task:
+            if constraint not in scheduled_list:
+                return False
+        self.is_feasible = True
+        return True
         
 
 class Schedule:
@@ -40,7 +43,7 @@ class Schedule:
         # 对于micro_batch_num = j的任务，j<=microbatches作为前向任务, micro_batch_num = j + micro_batches，作为对应的后向任务
         self.pp_stages = pp_stages # 阶段数
         self.task_counts = 0 # 任务计数器
-        self.mirco_batches = [] #里面抛开论文中的M1+M2这样的，我们为单个模型单独设置micro_batches,[(model_1, micro_batch_num_1), (model_2, micro_batch_num_2)]
+        self.mirco_batches = [] #里面抛开论文中的M1+M2这样的，我们为单个模型单独设置micro_batches,[(model_1, pp_stages,micro_batch_num_1), (model_2, pp_stages,micro_batch_num_2)]
         # self.tasks = {} # 任务列表,key为(pp_stage_id, micro_batch_id, model_id)
         self.task_list = [] # 任务列表，其实本质没有调度，调度直接体现在各个任务的start_time和end_time,而不是调度矩阵
         self.scheduled_task = [] # 已经完成调度的任务（这里的调度指的是依赖关系以及前后任务都已设置）
@@ -49,7 +52,11 @@ class Schedule:
         self.DC_delay_forward = [] # 前向延迟事件
         self.DC_delay_backward = [] # 后向延迟事件
         self.tasks = {} # task_id -> task映射字典
-
+        self.schdule_time_map = {} # 调度时间映射,key为task_id,value为end_time，这个一直都要改，每次计算不一样
+        self.total_end_time = 0 # 总的调度时间
+        self.DC_debug = False # 是否开启DC调试模式，默认不开启,开启后会考虑跨DC通信延迟
+        
+        
     def task_counter(self):
         self.task_counts += 1
         return self.task_counts
@@ -66,8 +73,10 @@ class Schedule:
             if task.model_id == model_id and task.pp_stage_id == A_pp_stage_id and task.micro_batch_id == A_micro_batch_id:
                 A_task = task
         if  B_task is None:
+            print(f"TaskB not found model_id:{model_id}, pp_stage_id:{B_pp_stage_id}, micro_batch_id:{B_micro_batch_id}")
             raise ValueError("TaskB not found bro!")
         if A_task is None:
+            print(f"TaskA not found model_id:{model_id}, pp_stage_id:{A_pp_stage_id}, micro_batch_id:{A_micro_batch_id}")
             raise ValueError("TaskA not found bro!")
         B_task.pre_task.append(A_task.task_id) # 添加前驱约束
 
@@ -93,43 +102,62 @@ class Schedule:
     '''
     def set_all_constraint(self, model_id, micro_batch_num,pp_start_layer, pp_total_num, is_reversed=False):
         dp_group = self.pp_stages // pp_total_num # 阶段数，比如一个模型覆盖所有设备，那就只有一个dp组，否则有多个dp组,这里我们默认都能整除
+        dp_group_batch_num = micro_batch_num // dp_group # 每个dp组的batch数
         step = 1 if is_reversed==False else -1
-        for i in range (dp_group):# device编号从0开始哈！，0~n-1
+        flag = 1 if is_reversed==False else 0
+        for i in range (dp_group):# device编号从1开始哈！，1-n
             for j in range(pp_start_layer + i * pp_total_num * step, pp_start_layer + (i + 1) * pp_total_num * step, step):
-                if j % pp_total_num == 0 or (j+1) % pp_total_num==0: #边界情况，只需要考虑intra_stage_constraint
-                    for k in range(1, micro_batch_num + 1):
-                        if k == 1: #第一个microbatch,不需要考虑intra_stage_constraint
-                            continue
-                        else: # 非第一个microbatch,需要考虑intra_stage_constraint
-                            self.add_constraint(( j, k - 1, j, k),model_id) # (pp_stage_id, micro_batch_id - 1) -> (pp_stage_id, micro_batch_id)
-                else: #非边界情况，我们需要考虑inter_stage_constraint以及intra_stage_constraint
-                    for k in range(1, micro_batch_num + 1):
-                        if k == 1: #第一个microbatch,不需要考虑intra_stage_constraint，只考虑inter_stage_constraint
-                            self.add_constraint((j - step, k, j, k), model_id)
-                        else:# 非第一个microbatch,需要考虑intra_stage_constraint和inter_stage_constraint
-                            self.add_constraint((j - step, k, j, k), model_id)
-                            self.add_constraint((j, k - 1, j, k), model_id)
+                # 前向任务
+                for k in range(1+i*dp_group_batch_num, 1+(i+1)*dp_group_batch_num):
+                    # 前向任务的首个行数，即第一行，需要考虑其左侧的约束
+                    if (j-flag) % pp_total_num == 0:
+                        if (k-1)%dp_group_batch_num !=0:# 第一个batch无约束
+                            self.add_constraint((j, k-1, j, k), model_id)
+                    else:
+                        if (k-1)%dp_group_batch_num ==0: # 无左侧约束，有inter_stage约束
+                            self.add_constraint((j-step, k, j, k), model_id)
+                        else:
+                            self.add_constraint((j, k-1, j, k), model_id)
+                            self.add_constraint((j-step, k, j, k), model_id)
+
+                # 后向任务
+                for k in range(1+i*dp_group_batch_num, 1+(i+1)*dp_group_batch_num):
+                    back_k = k + micro_batch_num # 后向任务的编号
+                    # 后向任务的首个行数，即最后一行，需要考虑其左侧的约束，intra_stage约束
+                    if (j-1+flag) % pp_total_num == 0:
+                        self.add_constraint((j, k, j, back_k), model_id)
+                    else:
+                        self.add_constraint((j+step, back_k, j, back_k), model_id) #inter_stage约束
+                        self.add_constraint((j, k, j, back_k), model_id) #intra_stage约束
+                        
+                
+        print(f"Model {model_id} add constraint successfully!")
 
     def add_model_tasks(self, model_id, micro_batch_num, pp_start_layer, pp_total_num, is_reversed=False):
         dp_groups = self.pp_stages // pp_total_num
+        dp_group_batch_num = micro_batch_num // dp_groups # 每个dp组的batch数
         step = 1 if is_reversed==False else -1
         for i in range(dp_groups):
             for j in range(pp_start_layer + i * pp_total_num * step, pp_start_layer + (i + 1) * pp_total_num * step, step):
-                for k in range(1, micro_batch_num + 1):
+                for k in range(1+i*dp_group_batch_num, 1+(i+1)*dp_group_batch_num):
+                    # 同一行的前向和后向的编号应该互补
                     task_forward = Task('forward', model_id, k, j, self.task_counter())
-                    task_backend = Task('backward', model_id, k + micro_batch_num, j, self.task_counter())
+                    task_backend = Task('backward', model_id, k+micro_batch_num, j, self.task_counter())
+                    if self.DC_debug == True:
+                        set_is_cross_DC_task(task_forward, pp_start_layer + i * pp_total_num * step, pp_start_layer + (i + 1) * pp_total_num * step-step, self.pp_stages//2, is_reversed)
+                        set_is_cross_DC_task(task_backend, pp_start_layer + i * pp_total_num * step, pp_start_layer + (i + 1) * pp_total_num * step-step, self.pp_stages//2, is_reversed)
                     self.task_list.append(task_forward)
                     self.task_list.append(task_backend)
                     self.tasks[task_forward.task_id] = task_forward
                     self.tasks[task_backend.task_id] = task_backend
 
-        self.mirco_batches.append((model_id, micro_batch_num)) # 添加模型的micro_batch_num元组
+        self.mirco_batches.append((model_id,pp_total_num, micro_batch_num)) # 添加模型的micro_batch_num元组
         self.set_all_constraint(model_id, micro_batch_num, pp_start_layer, pp_total_num, is_reversed)
         
     # 采用贪心算法初始化调度矩阵
     def greedy_init_matrix(self):
         # 先初始化我们关键的两个列表
-        self.scheduled_task = [] # 这应该是一个矩阵，调度完成得到矩阵，矩阵的位置关系表示行依赖关系, task_id矩阵
+        self.scheduled_task = [[] for _ in range(self.pp_stages)] # 这应该是一个矩阵，调度完成得到矩阵，矩阵的位置关系表示行依赖关系, task_id矩阵
         self.remained_task = self.task_list.copy() # 复制一份任务列表
         finished_task_list = [] # 记录已经完成的任务的元组列表，一个任务完成就加入task_id
         while(len(self.remained_task)> 0):
@@ -144,16 +172,16 @@ class Schedule:
             # 也只在下一轮才更新finished_tuple_list
             for task in self.remained_task:
                 task.update_feasibility(finished_task_list)
-            for i in range(self.pp_stages):
+            for i in range(self.pp_stages):# 0~n-1, 实际id为1~n
                 # 每一行我们维护一个可调度任务列表，然后从中选取一个可调度任务进行调度
                 feasible_task_list = []
                 for task in self.remained_task:
-                    if task.pp_stage_id == i and task.is_feasible:
+                    if task.pp_stage_id == i+1 and task.is_feasible==True:
                         feasible_task_list.append(task)
                 bigger_model = 100 # 这里我们约定，model_id越小，代表模型越大
                 target_task = None # 目标任务
                 for task in feasible_task_list:
-                    if task.model_id < bigger_model:
+                    if task.model_id <= bigger_model:
                         bigger_model = task.model_id
                         target_task = task
                 if target_task is None:
@@ -163,28 +191,45 @@ class Schedule:
                     self.scheduled_task[i].append(target_task.task_id)
                     self.remained_task.remove(target_task)
                     finished_task_list.append(target_task.task_id)
+        print("Greedy init matrix successfully!\n")
+        # print([len(a) for a in self.scheduled_task])
     
-    # 模拟退火 simulated annealing
+    # 模拟退火 simulated annealing，最后得到的
     def simulated_annealing(self):
-        self.greedy_init_matrix()
-        energy_current = energy_compute(self.scheduled_task, self)
+        print("Start simulated annealing!")
+        energy_current, self.schdule_time_map = energy_compute(self.scheduled_task, self)
         Temperature = energy_current
         while Temperature > config.Epsilon:
             optimized_matrix = random_neighborhood(self)
-            optimized_energy = energy_compute(optimized_matrix, self)
+            optimized_energy, optimized_time_schedule = energy_compute(optimized_matrix, self)
             if optimized_energy < energy_current:
                 energy_current = optimized_energy
-                self.scheduled_task = optimized_matrix
+                # self.scheduled_task = optimized_matrix
+                self.schdule_time_map = optimized_time_schedule
             else:
                 p = np.exp((energy_current - optimized_energy)/Temperature)
                 rand = random.random()
                 if rand <= p:
                     energy_current = optimized_energy
-                    self.scheduled_task = optimized_matrix
+                    # self.scheduled_task = optimized_matrix
+                    self.schdule_time_map = optimized_time_schedule
             Temperature = config.CoolingRate * Temperature
-
+        # 迭代计算完成,得到总调度时间，调度时间情况,schedule.schdule_time_map
+        self.total_end_time = energy_current
+        print("Simulated annealing successfully!")
+        print(f"Total end time: {self.total_end_time}")
+        print(f"Schedule time map: {self.schdule_time_map}")
          
 
 if __name__ == "__main__":
-    schedule = Schedule(8, 4)
+    schedule = Schedule(4)
+    schedule.add_model_tasks(1,4,1,4,False)
+    schedule.add_model_tasks(2,4,4,2,True)
+    schedule.greedy_init_matrix()
+    schedule.simulated_annealing()
+    data_dict = data_standardization_for_visual(schedule)
+    with open('data.json', 'w', encoding='utf-8') as f:
+        json.dump(data_dict, f)  # 写入文件（覆盖原有内容）
+    fig = create_figure(data_dict, schedule.pp_stages, schedule.total_end_time)
+    
     

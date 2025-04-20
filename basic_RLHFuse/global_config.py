@@ -10,9 +10,21 @@ DC_DELAY_TIME = 4
 OPTIMIZER = 1
 
 # 模拟退火参数
-Epsilon = 1
-CoolingRate = 0.90
+Epsilon = 0.000001
+CoolingRate = 0.99
 
+
+# 绘图颜色
+color_dict = {
+    1: {
+        'forward': '#1f77b4',  # 蓝色
+        'backward': '#2ca02c'  # 绿色
+    },
+    2: {
+        'forward': '#ff7f0e',  # 橙色
+        'backward': '#d62728'  # 红色
+    }
+}
 
 
 
