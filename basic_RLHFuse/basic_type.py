@@ -217,6 +217,7 @@ class Schedule:
         print("Start simulated annealing!")
         energy_current, self.schdule_time_map = energy_compute(self.scheduled_task, self)
         Temperature = energy_current
+        print(f"Initial energy: {energy_current}")
         while Temperature > config.Epsilon:
             optimized_matrix = random_neighborhood(self)
             optimized_energy, optimized_time_schedule = energy_compute(optimized_matrix, self)
@@ -232,6 +233,7 @@ class Schedule:
                     # self.scheduled_task = optimized_matrix
                     self.schdule_time_map = optimized_time_schedule
             Temperature = config.CoolingRate * Temperature
+            print(f"Current temperature: {Temperature}")
         # 迭代计算完成,得到总调度时间，调度时间情况,schedule.schdule_time_map
         self.total_end_time = energy_current
         print("Simulated annealing successfully!")

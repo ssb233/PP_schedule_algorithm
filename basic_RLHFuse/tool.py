@@ -3,13 +3,35 @@ from global_config import DC_DELAY_TIME
 
 # 判断一个调度是否有效（满足约束条件）, 调度矩阵只有行条件，因此看每一行即可
 # schedule_matrix = [[1,2,3],[4,5,6]] # 代表第1行的任务是1,2,3，第2行的任务是4,5,6
+# 约束来源于两个大的方面，一个是初始化情况下的任务约束关系，一个是给定行调度顺序的约束关系
+# 因此需要判断是否成环？进行拓扑排序，如果拓扑排序结果有效，我们用拓扑排序的结果去按顺序计算时间
+
 def check_schedule_is_valid(schedule_matrix,schedule):
-    for task in schedule.task_list:
-        for constraint_id in task.pre_task:
-            # 找到intra-stage约束
-            if schedule.tasks[constraint_id].pp_stage_id == task.pp_stage_id:
-                 if schedule_matrix[task.pp_stage_id-1].index(constraint_id) >= schedule_matrix[task.pp_stage_id-1].index(task.task_id):
-                     return False
+    dict = {} # 记录每个任务的前驱任务
+    for i in range(len(schedule_matrix)):
+        for j in range(len(schedule_matrix[i])):
+            if schedule_matrix[i][j] not in dict:
+                dict[schedule_matrix[i][j]] = set()
+            if j > 0:
+                dict[schedule_matrix[i][j]].add(schedule_matrix[i][j-1])
+            dict[schedule_matrix[i][j]].update(schedule.tasks[schedule_matrix[i][j]].pre_task)
+    topo_sort_list = [] # 记录拓扑排序的结果
+    while len(dict) >0:
+        is_ring = True # 是否有环
+        for key in list(dict.keys()):
+            if len(dict[key]) == 0:
+                del dict[key]
+                # 只要每轮删除了一个元素，就说明暂时无环
+                is_ring = False
+                topo_sort_list.append(key)
+                for k in dict.keys():
+                    if key in dict[k]:
+                        dict[k].remove(key)
+                break
+        if is_ring == True:
+            # print("find a ring in the schedule topo!")
+            return False
+    # print("find a valid schedule topo!")
     return True
     
             
@@ -31,23 +53,35 @@ def energy_compute(schedule_matrix, schedule):
     # 构建临时字典记录当前调度的时间规划情况
     task_time_dict = construct_task_time_dict(schedule.task_counts)
     total_end_time = 0
-    
-    for k in range(schedule.pp_stages):
-        for i in range(len(schedule_matrix[k])):
-            task_id = schedule_matrix[k][i]
+    iter_list = [0 for i in range(len(schedule_matrix))] # 记录每一行的当前迭代位置，强制必须从左到右按顺序调度
+    finished_task_list = [] # 记录已经完成的任务
+    while True:
+        all_line_finish = 0
+        for i in range(len(schedule_matrix)):
+            if iter_list[i] == len(schedule_matrix[i]):
+                all_line_finish += 1
+                continue
+            task_id = schedule_matrix[i][iter_list[i]] # 当前行的当前任务id
             task = schedule.tasks[task_id]
-            if i == 0:
-                # 我们不去改task.end_time，因为每次的计算都是临时的结果，并非最终
-                # task.end_time = compute_task_end_time(task_time_dict, task, schedule, iter_list[k]-1)
-                task_time_dict[task_id] = compute_task_end_time(task_time_dict,task, schedule)
-            else:
-                
-                left_task_end_time_max = max([task_time_dict[j] for j in schedule_matrix[k][:i]]) # 计算左侧任务的最大结束时间
-                task_time_dict[task_id] = compute_task_end_time(task_time_dict, task, schedule, left_task_end_time_max)
-            # 每次更新最终完成时间
-            if task_time_dict[task_id] > total_end_time:
-                total_end_time = task_time_dict[task_id]
-    # print(f"total_end_time: {total_end_time}")
+            is_feasible = True # 是否可调度
+
+            for constraint_id in task.pre_task:
+                if constraint_id not in finished_task_list:
+                    # 如果当前任务的前驱任务没有完成，则跳过
+                    is_feasible = False
+                    break
+            if is_feasible == True:
+                task_left_end_time = task_time_dict[schedule_matrix[i][iter_list[i]-1]] if iter_list[i] > 0 else 0
+                task_time_dict[task_id] = compute_task_end_time(task_time_dict, task, schedule, task_left_end_time)
+                if task_time_dict[task_id] > total_end_time:
+                    total_end_time = task_time_dict[task_id]
+
+                finished_task_list.append(task_id)
+                iter_list[i] += 1
+        # 每一行都被调度完成
+        if all_line_finish == len(schedule_matrix):
+            break
+            
     return total_end_time, task_time_dict
 
 

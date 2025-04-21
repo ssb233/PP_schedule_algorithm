@@ -10,8 +10,8 @@ DC_DELAY_TIME = 4
 OPTIMIZER = 1
 
 # 模拟退火参数
-Epsilon = 0.000001
-CoolingRate = 0.99
+Epsilon = 0.0000001
+CoolingRate = 0.999
 
 
 # 绘图颜色
